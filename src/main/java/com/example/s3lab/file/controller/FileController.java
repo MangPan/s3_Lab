@@ -100,6 +100,13 @@ public class FileController {
         return ResponseEntity.noContent().build();
     }
 
+    @DeleteMapping("/{fileId}")
+    public ResponseEntity<Void> deleteByFileId(@PathVariable String fileId){
+        fileService.deleteByFileId(fileId);
+        
+        return ResponseEntity.noContent().build();
+    }
+
 
     /**
      * Presigned 다운로드 URL 발급 (GET /files/presigned-get-url)

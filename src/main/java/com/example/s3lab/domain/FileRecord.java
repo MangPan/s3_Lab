@@ -16,8 +16,12 @@ public class FileRecord {
     private FileStatus status;
     private Long size;
     private String actualContentType;
+
+    private String failedReason;
+
     private final Instant createdAt;
     private Instant uploadedAt;
+    private Instant deletedAt;
 
     public FileRecord(
         String bucket,
@@ -39,5 +43,15 @@ public class FileRecord {
         this.size = size;
         this.actualContentType = actualContentType;
         this.uploadedAt = Instant.now();
+    }
+
+    public void fail(String reason){
+        this.status = FileStatus.FAILED;
+        this.failedReason = reason;
+    }
+
+    public void delete(){
+        this.status = FileStatus.DELETED;
+        this.deletedAt = Instant.now();
     }
 }

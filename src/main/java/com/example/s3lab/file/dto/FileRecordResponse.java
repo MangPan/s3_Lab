@@ -14,8 +14,11 @@ public record FileRecordResponse(
         FileStatus status,
         Long size,
         String actualContentType,
+        String failedReason,
         Instant createdAt,
-        Instant uploadedAt) {
+        Instant uploadedAt,
+        Instant deletedAt
+    ) {
 
     public static FileRecordResponse from(FileRecord fileRecord){
         return new FileRecordResponse(
@@ -27,8 +30,10 @@ public record FileRecordResponse(
             fileRecord.getStatus(),
             fileRecord.getSize(),
             fileRecord.getActualContentType(),
+            fileRecord.getFailedReason(),
             fileRecord.getCreatedAt(),
-            fileRecord.getUploadedAt()
+            fileRecord.getUploadedAt(),
+            fileRecord.getDeletedAt()
         );
     }
 }
