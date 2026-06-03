@@ -8,6 +8,44 @@
 /files
 ```
 
+## 공통 에러 응답
+
+전역 예외 처리는 `GlobalExceptionHandler`에서 담당합니다.
+
+에러 응답 형식:
+
+```json
+{
+  "node": "ERROR_CODE",
+  "message": "에러 메시지",
+  "errors": []
+}
+```
+
+검증 실패처럼 필드 단위 오류가 있는 경우 `errors`에 필드명과 메시지가 들어갑니다.
+
+```json
+{
+  "node": "VALIDATION_FAILED",
+  "message": "요청 값 검증에 실패했습니다",
+  "errors": [
+    {
+      "field": "filename",
+      "message": "file name is required."
+    }
+  ]
+}
+```
+
+주요 HTTP 상태:
+
+| Status | 상황 |
+| --- | --- |
+| `400 Bad Request` | 요청 값 검증 실패, 허용되지 않은 Content-Type, 파일 크기 제한 초과 |
+| `404 Not Found` | 파일 기록을 찾을 수 없음 |
+| `409 Conflict` | 현재 파일 상태와 요청이 충돌함 |
+| `500 Internal Server Error` | 처리하지 못한 서버 내부 오류 |
+
 ## 1. Multipart 파일 업로드
 
 ```http
@@ -202,6 +240,13 @@ Content-Type: application/json
 
 이 API는 파일 바이트를 받지 않습니다. 파일명과 Content-Type만 받아 S3 key와 Presigned URL을 생성합니다.
 
+요청한 Content-Type은 아래 값만 허용됩니다.
+
+- `image/jpeg`
+- `image/png`
+- `image/webp`
+- `text/plain`
+
 ### Request
 
 ```json
@@ -242,9 +287,22 @@ curl -X POST http://localhost:8080/files/presigned-put-url \
 ```text
 FileController.createPresignedPutUrl
 -> FileService.createPresignedPutUrl
+-> validateRequestedContentType
 -> FileRecord 생성, 상태 PENDING
 -> FileRecordRepository.save
 -> S3Presigner.presignPutObject
+```
+
+### 실패 응답 예시
+
+허용되지 않은 Content-Type을 요청하면 `400 Bad Request`가 반환됩니다.
+
+```json
+{
+  "node": "INVALID_CONTENT_TYPE",
+  "message": "허용되지 않는 Content-Type입니다. contentType=application/pdf",
+  "errors": []
+}
 ```
 
 ## 7. Presigned PUT 업로드 완료 검증
@@ -256,6 +314,13 @@ POST /files/{fileId}/complete
 Presigned PUT URL로 S3에 직접 업로드한 뒤, 백엔드에 업로드 완료를 알리는 API입니다.
 
 백엔드는 S3에 `HeadObject` 요청을 보내 실제 객체가 존재하는지 확인합니다. 확인에 성공하면 파일 기록 상태를 `UPLOADED`로 변경합니다.
+
+완료 검증 시 아래 조건도 함께 확인합니다.
+
+- S3 객체가 실제로 존재해야 합니다.
+- 파일 크기는 5MB 이하여야 합니다.
+- 업로드된 객체의 Content-Type이 허용 목록에 포함되어야 합니다.
+- 요청 당시 Content-Type과 실제 업로드된 Content-Type이 같아야 합니다.
 
 ### Request
 
@@ -281,8 +346,10 @@ curl -X POST http://localhost:8080/files/{fileId}/complete
   "status": "UPLOADED",
   "size": 1234,
   "actualContentType": "text/plain",
+  "failedReason": null,
   "createdAt": "2026-06-03T00:00:00Z",
-  "uploadedAt": "2026-06-03T00:01:00Z"
+  "uploadedAt": "2026-06-03T00:01:00Z",
+  "deletedAt": null
 }
 ```
 
@@ -292,8 +359,32 @@ curl -X POST http://localhost:8080/files/{fileId}/complete
 FileController.completeUpload
 -> FileService.completeUpload
 -> FileRecordRepository.findById
+-> 상태 확인
 -> S3Client.headObject
+-> validateUploadedObject
 -> FileRecord.complete
+```
+
+### 실패 응답 예시
+
+S3에 아직 객체가 없으면 파일 상태가 `FAILED`로 바뀌고 `409 Conflict`가 반환됩니다.
+
+```json
+{
+  "node": "S3_OBJECT_NOT_FOUND",
+  "message": "아직 S3에 파일이 업로드되지 않았습니다. key=uploads/uuid-sample.txt",
+  "errors": []
+}
+```
+
+이미 삭제된 파일을 완료 처리하려고 하면 `409 Conflict`가 반환됩니다.
+
+```json
+{
+  "node": "DELETED_FILE_CANNOT_COMPLETE",
+  "message": "삭제된 파일은 완료 처리할 수 없습니다. fileId=file-record-id",
+  "errors": []
+}
 ```
 
 ## 8. 파일 기록 목록 조회
@@ -325,8 +416,10 @@ curl http://localhost:8080/files/records
     "status": "UPLOADED",
     "size": 1234,
     "actualContentType": "text/plain",
+    "failedReason": null,
     "createdAt": "2026-06-03T00:00:00Z",
-    "uploadedAt": "2026-06-03T00:01:00Z"
+    "uploadedAt": "2026-06-03T00:01:00Z",
+    "deletedAt": null
   }
 ]
 ```
@@ -382,3 +475,52 @@ FileController.createPresignedGetUrlByFileId
 -> FileService.createPresignedGetUrl
 ```
 
+### 실패 응답 예시
+
+업로드 완료 상태가 아닌 파일에 대해 다운로드 URL을 요청하면 `409 Conflict`가 반환됩니다.
+
+```json
+{
+  "node": "FILE_NOT_UPLOADED",
+  "message": "업로드 완료된 파일만 다운로드 URL을 발급할 수 있습니다. status=PENDING",
+  "errors": []
+}
+```
+
+## 10. fileId 기반 파일 삭제
+
+```http
+DELETE /files/{fileId}
+```
+
+파일 기록 ID로 S3 객체를 삭제하고 파일 상태를 `DELETED`로 변경합니다.
+
+이미 `DELETED` 상태인 파일에 다시 호출하면 추가 작업 없이 `204 No Content`를 반환합니다.
+
+### Request
+
+| 이름 | 위치 | 타입 | 설명 |
+| --- | --- | --- | --- |
+| `fileId` | path variable | string | 파일 기록 ID |
+
+### curl
+
+```bash
+curl -X DELETE http://localhost:8080/files/{fileId}
+```
+
+### Response
+
+```http
+204 No Content
+```
+
+### 내부 흐름
+
+```text
+FileController.deleteByFileId
+-> FileService.deleteByFileId
+-> FileRecordRepository.findById
+-> S3Client.deleteObject
+-> FileRecord.delete
+```

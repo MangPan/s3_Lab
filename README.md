@@ -12,7 +12,8 @@ Spring Boot와 MinIO를 이용해 S3 파일 업로드, 다운로드, Presigned U
 - Presigned GET URL을 발급해 클라이언트가 직접 다운로드하기
 - Presigned PUT URL을 발급해 클라이언트가 S3에 직접 업로드하기
 - 업로드 완료 후 `HeadObject`로 실제 S3 객체 존재 여부 검증하기
-- 파일 업로드 상태를 `PENDING`, `UPLOADED`로 관리하기
+- 파일 업로드 상태를 `PENDING`, `UPLOADED`, `FAILED`, `DELETED`로 관리하기
+- 전역 예외 처리로 일관된 에러 응답 내려주기
 
 ## 기술 스택
 
@@ -33,6 +34,8 @@ src/main/java/com/example/s3lab
 ├── domain
 │   ├── FileRecord.java
 │   └── FileStatus.java
+├── global
+│   └── exception
 └── file
     ├── controller
     │   └── FileController.java
@@ -102,6 +105,7 @@ s3.secret-key=minioadmin123
 | `GET` | `/files` | S3 객체 목록 조회 |
 | `GET` | `/files/download?key=...` | 파일 다운로드 |
 | `DELETE` | `/files?key=...` | 파일 삭제 |
+| `DELETE` | `/files/{fileId}` | fileId 기반 파일 삭제 |
 | `GET` | `/files/presigned-get-url?key=...` | key 기반 Presigned GET URL 발급 |
 | `POST` | `/files/presigned-put-url` | Presigned PUT URL 발급 |
 | `POST` | `/files/{fileId}/complete` | Presigned PUT 업로드 완료 검증 |
@@ -114,6 +118,6 @@ s3.secret-key=minioadmin123
 
 - [API 정리](docs/api.md)
 - [코드 구조 설명](docs/code-map.md)
+- [예외 처리](docs/error-handling.md)
 - [Presigned URL 흐름](docs/presigned-url-flow.md)
 - [S3와 MinIO 설정](docs/s3-and-minio.md)
-

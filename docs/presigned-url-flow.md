@@ -37,6 +37,7 @@ Presigned URL은 서버가 가진 S3 접근 권한을 이용해 특정 작업을
 3. 클라이언트 -> S3 또는 MinIO: 파일 직접 PUT
 4. 클라이언트 -> Spring Boot 서버: 업로드 완료 검증 요청
 5. Spring Boot 서버 -> S3 또는 MinIO: HeadObject로 실제 업로드 확인
+6. Spring Boot 서버: 파일 크기와 Content-Type 검증
 ```
 
 파일 바이트가 백엔드 서버를 거치지 않고 클라이언트에서 S3로 직접 전송됩니다.
@@ -98,7 +99,16 @@ Content-Type: application/json
 }
 ```
 
-서버는 파일명을 바탕으로 고유 S3 key를 생성합니다.
+서버는 요청한 Content-Type이 허용 목록에 있는지 먼저 검사합니다.
+
+허용되는 Content-Type:
+
+- `image/jpeg`
+- `image/png`
+- `image/webp`
+- `text/plain`
+
+그 다음 파일명을 바탕으로 고유 S3 key를 생성합니다.
 
 예시:
 
@@ -147,6 +157,7 @@ curl -X PUT "{presigned-url}" \
 - Presigned URL 생성 시 사용한 Content-Type과 실제 PUT 요청의 Content-Type이 같아야 합니다.
 - URL은 10분 동안만 유효합니다.
 - URL 만료 후에는 다시 발급받아야 합니다.
+- 업로드 완료 검증 시 파일 크기는 5MB 이하여야 합니다.
 
 ## 4. 업로드 완료 검증 요청
 
@@ -167,9 +178,16 @@ HeadObjectRequest
 
 `HeadObject`는 파일 전체를 다운로드하지 않고, 객체의 존재 여부와 메타데이터만 확인합니다.
 
+확인하는 값:
+
+- 객체 존재 여부
+- 파일 크기
+- 실제 Content-Type
+- 요청 당시 Content-Type과 실제 Content-Type 일치 여부
+
 ## 5. 상태 변경
 
-S3 객체가 실제로 존재하면 `FileRecord.complete`가 호출됩니다.
+S3 객체가 실제로 존재하고 검증 조건을 통과하면 `FileRecord.complete`가 호출됩니다.
 
 ```text
 PENDING -> UPLOADED
@@ -181,6 +199,8 @@ PENDING -> UPLOADED
 - 실제 Content-Type
 - 업로드 완료 시각
 
+검증 실패나 S3 객체 미존재 상황에서는 `FileRecord.fail`이 호출되어 상태가 `FAILED`로 바뀔 수 있습니다.
+
 ## 상태 전환
 
 ```text
@@ -190,7 +210,26 @@ Presigned PUT URL 발급
 -> 클라이언트가 S3에 직접 업로드
 -> complete API 호출
 -> HeadObject 성공
+-> 파일 검증 성공
 -> UPLOADED
+```
+
+실패 흐름:
+
+```text
+PENDING
+-> complete API 호출
+-> S3 객체 미존재 또는 검증 실패
+-> FAILED
+```
+
+삭제 흐름:
+
+```text
+PENDING 또는 UPLOADED 또는 FAILED
+-> deleteByFileId API 호출
+-> S3 deleteObject
+-> DELETED
 ```
 
 ## 멱등성 처리
@@ -205,3 +244,4 @@ if(fileRecord.getStatus() == FileStatus.UPLOADED){
 
 즉, 완료 API가 중복 호출되어도 이미 완료된 파일은 다시 검증하지 않고 현재 기록을 반환합니다.
 
+`deleteByFileId`도 이미 `DELETED` 상태인 파일에 대해 다시 호출되면 추가 삭제 요청 없이 종료합니다.

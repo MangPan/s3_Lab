@@ -12,6 +12,8 @@ HTTP 요청
 -> MinIO
 ```
 
+예외가 발생하면 `GlobalExceptionHandler`가 공통 에러 응답 형식으로 변환합니다.
+
 Presigned PUT 업로드 흐름에서는 파일 상태를 추적하기 위해 `FileRecordRepository`와 `FileRecord`가 함께 사용됩니다.
 
 ```text
@@ -21,6 +23,7 @@ Presigned PUT URL 발급
 -> 클라이언트가 S3에 직접 업로드
 -> complete API 호출
 -> HeadObject로 실제 업로드 확인
+-> 파일 크기와 Content-Type 검증
 -> UPLOADED 상태 변경
 ```
 
@@ -84,12 +87,18 @@ Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니�
 - `status`: 업로드 상태
 - `size`: S3에 실제 업로드된 파일 크기
 - `actualContentType`: S3가 가진 실제 Content-Type
+- `failedReason`: 실패 상태로 전환된 이유
 - `createdAt`: 기록 생성 시각
 - `uploadedAt`: 업로드 완료 시각
+- `deletedAt`: 삭제 처리 시각
 
 처음 생성될 때 상태는 `PENDING`입니다.
 
 `complete` 메서드가 호출되면 상태가 `UPLOADED`로 바뀌고, 실제 파일 크기와 Content-Type이 저장됩니다.
+
+`fail` 메서드가 호출되면 상태가 `FAILED`로 바뀌고 실패 이유가 저장됩니다.
+
+`delete` 메서드가 호출되면 상태가 `DELETED`로 바뀌고 삭제 시각이 저장됩니다.
 
 ## `domain/FileStatus.java`
 
@@ -99,6 +108,8 @@ Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니�
 
 - `PENDING`: Presigned PUT URL은 발급됐지만 아직 업로드 완료 검증 전
 - `UPLOADED`: S3에 객체가 존재함을 확인한 상태
+- `FAILED`: 업로드 완료 검증 또는 파일 검증에 실패한 상태
+- `DELETED`: 파일 삭제가 처리된 상태
 
 ## `file/controller/FileController.java`
 
@@ -121,6 +132,7 @@ Controller는 요청 파라미터, path variable, request body를 받아 `FileSe
 - Presigned URL 발급 요청 받기
 - 업로드 완료 검증 요청 받기
 - 파일 기록 목록 조회 요청 받기
+- fileId 기반 삭제 요청 받기
 
 파일 다운로드 API에서는 S3 key에서 파일명을 추출하고, `Content-Disposition` 헤더를 구성합니다.
 
@@ -141,6 +153,9 @@ Controller는 요청 파라미터, path variable, request body를 받아 `FileSe
 - 업로드 완료 검증
 - 파일 기록 목록 조회
 - fileId 기반 다운로드 URL 발급
+- fileId 기반 삭제
+- 요청 Content-Type 검증
+- 업로드된 객체의 크기와 Content-Type 검증
 
 ### 일반 업로드
 
@@ -165,6 +180,7 @@ key
 
 ```text
 filename, contentType
+-> validateRequestedContentType
 -> generateKey
 -> FileRecord 생성
 -> repository 저장
@@ -180,8 +196,21 @@ fileId
 -> FileRecord 조회
 -> HeadObjectRequest 생성
 -> S3Client.headObject
+-> validateUploadedObject
 -> FileRecord.complete
 -> FileRecordResponse 반환
+```
+
+검증 실패나 S3 객체 미존재 상황에서는 파일 상태가 `FAILED`로 변경될 수 있습니다.
+
+### fileId 기반 삭제
+
+```text
+fileId
+-> FileRecord 조회
+-> 이미 DELETED면 바로 종료
+-> S3Client.deleteObject
+-> FileRecord.delete
 ```
 
 ## `file/repository/FileRecordRepository.java`
@@ -277,6 +306,75 @@ S3 객체 목록 조회 응답에 사용합니다.
 - `status`
 - `size`
 - `actualContentType`
+- `failedReason`
 - `createdAt`
 - `uploadedAt`
+- `deletedAt`
 
+## `global/exception`
+
+전역 예외 처리와 공통 에러 응답을 담당하는 패키지입니다.
+
+### `BadRequestException`
+
+잘못된 요청 값을 표현하는 예외입니다.
+
+예시:
+
+- 허용되지 않는 Content-Type
+- 파일 크기 제한 초과
+- 요청 Content-Type과 실제 업로드 Content-Type 불일치
+
+HTTP 응답 상태는 `400 Bad Request`입니다.
+
+### `NotFoundException`
+
+요청한 리소스를 찾지 못했을 때 사용하는 예외입니다.
+
+현재는 파일 기록 ID를 찾지 못했을 때 사용합니다.
+
+HTTP 응답 상태는 `404 Not Found`입니다.
+
+### `ConflictException`
+
+요청 자체는 이해했지만 현재 리소스 상태와 충돌할 때 사용하는 예외입니다.
+
+예시:
+
+- 아직 S3에 업로드되지 않은 파일 완료 처리
+- 삭제된 파일 완료 처리
+- 실패 상태 파일 완료 처리
+- 업로드 완료 전 다운로드 URL 요청
+
+HTTP 응답 상태는 `409 Conflict`입니다.
+
+### `GlobalExceptionHandler`
+
+`@RestControllerAdvice`로 등록된 전역 예외 처리기입니다.
+
+처리하는 예외:
+
+- `BadRequestException`
+- `NotFoundException`
+- `ConflictException`
+- `MethodArgumentNotValidException`
+- 기타 `Exception`
+
+### `ErrorResponse`
+
+공통 에러 응답 DTO입니다.
+
+필드:
+
+- `node`: 에러 코드
+- `message`: 에러 메시지
+- `errors`: 필드 단위 검증 오류 목록
+
+### `FieldErrorResponse`
+
+필드 단위 검증 실패를 표현하는 DTO입니다.
+
+필드:
+
+- `field`
+- `message`
