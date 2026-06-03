@@ -2,6 +2,7 @@ package com.example.s3lab.file.controller;
 
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -17,6 +18,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import com.example.s3lab.file.dto.FileObjectResponse;
+import com.example.s3lab.file.dto.FileRecordResponse;
 import com.example.s3lab.file.dto.FileUploadResponse;
 import com.example.s3lab.file.dto.PresignedGetUrlResponse;
 import com.example.s3lab.file.dto.PresignedPutUrlRequest;
@@ -118,6 +120,24 @@ public class FileController {
     ) {
         return fileService.createPresignedPutUrl(request);
     }
+
+    @PostMapping("/{fileId}/complete")
+    public FileRecordResponse completeUpload(@PathVariable String fileId) {
+        return fileService.completeUpload(fileId);
+    }
+
+    @GetMapping("/records")
+    public List<FileRecordResponse> listRecords() {
+        return fileService.listRecords();
+    }
+
+    @GetMapping("/{fileId}/presigned-get-url")
+    public PresignedGetUrlResponse createPresignedGetUrlByFileId(@PathVariable String fileId) {
+        return fileService.createPresignedGetUrlByFileId(fileId);
+    }
+    
+    
+    
     
     
 
