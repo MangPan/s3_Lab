@@ -14,6 +14,8 @@ import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.retries.StandardRetryStrategy;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 @Configuration
 public class S3Config {
@@ -23,19 +25,23 @@ public class S3Config {
      * maxAttempts(10) == 최대 10번 재시도
      * 
      * - AdaptiveRetryStrategy
-     *  클라이언트가 요청을 보내다가 서버로부터 Throttling, 429 에러 등을 받으면
-     *  자신이 요청을 보내는 속도 (Rate Limiting) 자체를 실시간으로 늦춰줌
+     * 클라이언트가 요청을 보내다가 서버로부터 Throttling, 429 에러 등을 받으면
+     * 자신이 요청을 보내는 속도 (Rate Limiting) 자체를 실시간으로 늦춰줌
      */
     StandardRetryStrategy retryStrategy = AwsRetryStrategy.standardRetryStrategy()
-        .toBuilder()
-        .maxAttempts(10) // 10번 재시도
-        .build();
+            .toBuilder()
+            .maxAttempts(10) // 10번 재시도
+            .build();
 
     @Bean
     public S3Client s3Client(
         // application-properties
         @Value("${s3.endpoint}") String endpoint,
         @Value("${s3.region}") String region,
+        /**
+         * 학습의 편의를 위해 accessKey, secretKey를 application properties에 박아놨는데
+         * 실서비스에서는 절대로 금지
+         */
         @Value("${s3.access-key}") String accessKey,
         @Value("${s3.secret-key}") String secretKey
     ){
@@ -98,6 +104,35 @@ public class S3Config {
 
                     // HTTP 헤더 조작
                     .putHeader("X-Custom-Header", "my-s3-lab-app")
+                    .build()
+            )
+            .build();
+    }
+
+    @Bean
+    public S3Presigner s3Presigner(
+        @Value("${s3.endpoint}") String endpoint,
+        @Value("${s3.region}") String region,
+        @Value("${s3.access-key}") String accessKey,
+        @Value("${s3.secret-key}") String secretKey
+    ){
+        return S3Presigner.builder()
+            // S3Presigner가 임시 URL 주소를 문자열로 조합해낼 때 기준이 될 서버주소
+            .endpointOverride(URI.create(endpoint))
+            .region(Region.of(region))
+
+            // 임시 URL에 포함될 서명을 안전하게 암호화 연산하기 위해 static id/pw 자격증명 주입
+            .credentialsProvider(
+                StaticCredentialsProvider.create(
+                    AwsBasicCredentials.create(accessKey, secretKey)
+                )
+            )
+            
+            // S3Presigner의 세부 동작을 정의
+            .serviceConfiguration(
+                S3Configuration.builder()
+                    // 생성될 임시 URL 형식을 Virtual Host 방식이 아닌 Path방식으로 지정
+                    .pathStyleAccessEnabled(true)
                     .build()
             )
             .build();

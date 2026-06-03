@@ -18,11 +18,17 @@ import org.springframework.http.ResponseEntity;
 
 import com.example.s3lab.file.dto.FileObjectResponse;
 import com.example.s3lab.file.dto.FileUploadResponse;
+import com.example.s3lab.file.dto.PresignedGetUrlResponse;
+import com.example.s3lab.file.dto.PresignedPutUrlRequest;
+import com.example.s3lab.file.dto.PresignedPutUrlResponse;
 import com.example.s3lab.file.service.FileService;
 
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import org.springframework.web.bind.annotation.RequestBody;
+
 
 @RestController
 @RequestMapping("/files")
@@ -91,6 +97,33 @@ public class FileController {
 
         return ResponseEntity.noContent().build();
     }
+
+
+    /**
+     * Presigned 다운로드 URL 발급 (GET /files/presigned-get-url)
+     * 특정 오브젝트의 key를 통해 다운로드 가능한 일회성 url을 발급한다.
+     */
+    @GetMapping("/presigned-get-url")
+    public PresignedGetUrlResponse createPresignedGetUrl(@RequestParam String key) {
+        return fileService.createPresignedGetUrl(key);
+    }
+
+    /**
+     * Presigned 업로드 URL 발급 (POST /files/presigned-put-url)
+     * 파일을 업로드 할 수 있는 일회성 url을 발급한다.
+     */
+    @PostMapping("/presigned-put-url")
+    public PresignedPutUrlResponse createPresignedPutUrl(
+        @Valid @RequestBody PresignedPutUrlRequest request
+    ) {
+        return fileService.createPresignedPutUrl(request);
+    }
+    
+    
+
+
+
+
 
 
     /**
