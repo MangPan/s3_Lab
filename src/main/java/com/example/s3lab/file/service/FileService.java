@@ -17,6 +17,7 @@ import com.example.s3lab.file.repository.FileRecordRepository;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -53,23 +54,29 @@ public class FileService {
         "image/webp",
         "text/plain"
     );
-    private static final long PENDING_EXPIRATION_SECONDS = 10;
-
-
+    
+    private static final int EXPIRE_BATCH_SIZE = 100;
+    private static final int MAX_EXPIRE_BATCHES_PER_RUN = 10;
+    
+    
     private final S3Client s3Client; // S3Config에서 생성(등록)한 Bean이 스프링에 의해 주입됨
     private final S3Presigner s3Presigner;
     private final FileRecordRepository fileRecordRepository;
     private final String bucket; // application.yml or properties에 설정된 버킷 이름
 
+    private final long pendingExpirationSeconds;
+    
     public FileService(
             S3Client s3Client,
             S3Presigner s3Presigner,
             FileRecordRepository fileRecordRepository,
-            @Value("${s3.bucket}") String bucket) {
+            @Value("${s3.bucket}") String bucket,
+            @Value("${file.pending-expiration-seconds}") long pendingExpirationSeconds) {
         this.s3Client = s3Client;
         this.s3Presigner = s3Presigner;
         this.fileRecordRepository = fileRecordRepository;
         this.bucket = bucket;
+        this.pendingExpirationSeconds = pendingExpirationSeconds;
     }
 
     // ====================================================================================================
@@ -372,16 +379,53 @@ public class FileService {
         fileRecord.delete();
     }
 
-    public List<ExpiredFileResponse> expirePendingFiles(){
-        Instant now = Instant.now();
+    // public List<ExpiredFileResponse> expirePendingFiles(){
+    //     Instant now = Instant.now();
 
-        return fileRecordRepository.findByStatus(FileStatus.PENDING)
-            .stream()
-            .filter(fileRecord -> fileRecord.isPendingExpired(now, PENDING_EXPIRATION_SECONDS))
-            .map(this::expirePendingFile)
-            .toList();
+    //     return fileRecordRepository.findByStatus(FileStatus.PENDING)
+    //         .stream()
+    //         .filter(fileRecord -> fileRecord.isPendingExpired(now, PENDING_EXPIRATION_SECONDS))
+    //         .map(this::expirePendingFile)
+    //         .toList();
             
-    }
+    // }
+
+    public List<ExpiredFileResponse> expirePendingFiles(){
+        // 현재시간에서 PENDING_EXPIRATION_SECONDS를 뺀 시간을 구해 만료 시점 cutoff를 생성
+        Instant cutoff = Instant.now().minusSeconds(this.pendingExpirationSeconds);
+
+        // 최종 처리 결과를 누적할 리스트 동적 배열로 처리 
+        List<ExpiredFileResponse> results = new ArrayList<ExpiredFileResponse>();
+
+        // 최대 지정된 배치 크기 만큼 반복
+        for(int i = 0; i < MAX_EXPIRE_BATCHES_PER_RUN; i++){
+            
+            // 데이터베이스에서 만료 대상 파일을 배치 크기 만큼 조회
+            List<FileRecord> targets = fileRecordRepository
+                .findExpiredPendingFiles(cutoff, EXPIRE_BATCH_SIZE);
+
+            // 만일 조회된게 없다면 루프 종료
+            if(targets.isEmpty()){
+                break;  
+            }
+            
+            // 조회된 파일들을 expirePendingFile의 매개로 넘겨 만료처리
+            List<ExpiredFileResponse> batchResults = targets.stream()
+                .map(this::expirePendingFile)
+                .toList();
+            
+            // 해당 배치에서 처리된 결과를 최종 결과 리스트에 모두 추가
+            results.addAll(batchResults);
+
+            // 만일 처리된 결과 리스트가 설정된 배치 크기보다 작다면 더 이상 처리할 대상이 없다는 의미이므로 루프 종료
+            if(batchResults.size() < EXPIRE_BATCH_SIZE){
+                break;
+            }
+        }
+
+        // 누적된 결과 리스트 반환
+        return results;
+    } 
 
     // ====================================================================================================
     // PRIVATE HELPER METHODS
@@ -452,6 +496,15 @@ public class FileService {
         }
     }
 
+    /**
+     * fileRecord를 통해 s3에 object가 있는지 여부
+     * fileRecord의 expire 메소드를 호출해 fileRecord의 status 업데이트
+     * 이후 ExpiredFileResponse dto로 반환
+     * 
+     * 즉 bucket에 object가 존재 하는지 여부를 확인하고
+     * 있다면 삭제(expire 처리해야하므로)
+     * 없더라도 해당 fileRecord의 status를 expire로 업데이트
+     */
     private ExpiredFileResponse expirePendingFile(FileRecord fileRecord){
         boolean objectDeleted = deleteObjectIfExists(fileRecord);
 
@@ -464,6 +517,11 @@ public class FileService {
         );
     }
 
+    /**
+     * S3Client.headObject를 통해 object 존재 여부 확인 후
+     * 있다면 삭제
+     * 삭제 성공 여부를 반환
+     */
     private boolean deleteObjectIfExists(FileRecord fileRecord){
         try{
             HeadObjectRequest headRequest = HeadObjectRequest.builder()
