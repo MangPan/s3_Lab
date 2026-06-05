@@ -315,6 +315,8 @@ Presigned PUT URL로 S3에 직접 업로드한 뒤, 백엔드에 업로드 완�
 
 백엔드는 S3에 `HeadObject` 요청을 보내 실제 객체가 존재하는지 확인합니다. 확인에 성공하면 파일 기록 상태를 `UPLOADED`로 변경합니다.
 
+이미 `UPLOADED` 상태인 파일에 다시 호출하면 같은 파일 기록을 반환합니다.
+
 완료 검증 시 아래 조건도 함께 확인합니다.
 
 - S3 객체가 실제로 존재해야 합니다.
@@ -346,9 +348,10 @@ curl -X POST http://localhost:8080/files/{fileId}/complete
   "status": "UPLOADED",
   "size": 1234,
   "actualContentType": "text/plain",
-  "failedReason": null,
+  "rejectedReason": null,
   "createdAt": "2026-06-03T00:00:00Z",
   "uploadedAt": "2026-06-03T00:01:00Z",
+  "expiredAt": null,
   "deletedAt": null
 }
 ```
@@ -367,12 +370,22 @@ FileController.completeUpload
 
 ### 실패 응답 예시
 
-S3에 아직 객체가 없으면 파일 상태가 `FAILED`로 바뀌고 `409 Conflict`가 반환됩니다.
+S3에 아직 객체가 없으면 `409 Conflict`가 반환됩니다. 파일 상태는 `PENDING`으로 유지되므로, 실제 업로드가 끝난 뒤 complete API를 다시 호출할 수 있습니다.
 
 ```json
 {
   "node": "S3_OBJECT_NOT_FOUND",
   "message": "아직 S3에 파일이 업로드되지 않았습니다. key=uploads/uuid-sample.txt",
+  "errors": []
+}
+```
+
+업로드된 객체가 파일 크기 또는 Content-Type 정책을 통과하지 못하면 `400 Bad Request`가 반환되고 파일 상태는 `REJECTED`로 변경됩니다.
+
+```json
+{
+  "node": "CONTENT_TYPE_MISMATCH",
+  "message": "요청 Content-Type과 실제 Content-Type이 다릅니다. requested=text/plain, actual=image/png",
   "errors": []
 }
 ```
@@ -383,6 +396,16 @@ S3에 아직 객체가 없으면 파일 상태가 `FAILED`로 바뀌고 `409 Con
 {
   "node": "DELETED_FILE_CANNOT_COMPLETE",
   "message": "삭제된 파일은 완료 처리할 수 없습니다. fileId=file-record-id",
+  "errors": []
+}
+```
+
+이미 거부된 파일을 완료 처리하려고 하면 `409 Conflict`가 반환됩니다.
+
+```json
+{
+  "node": "FAILED_FILE_CANNOT_COMPLETE",
+  "message": "실패 처리된 파일은 완료 처리할 수 없습니다. fileId=file-record-id",
   "errors": []
 }
 ```
@@ -416,9 +439,10 @@ curl http://localhost:8080/files/records
     "status": "UPLOADED",
     "size": 1234,
     "actualContentType": "text/plain",
-    "failedReason": null,
+    "rejectedReason": null,
     "createdAt": "2026-06-03T00:00:00Z",
     "uploadedAt": "2026-06-03T00:01:00Z",
+    "expiredAt": null,
     "deletedAt": null
   }
 ]
@@ -523,4 +547,56 @@ FileController.deleteByFileId
 -> FileRecordRepository.findById
 -> S3Client.deleteObject
 -> FileRecord.delete
+```
+
+## 11. 만료된 PENDING 파일 정리
+
+```http
+POST /files/expire-pending
+```
+
+Presigned PUT URL을 발급받았지만 제한 시간 안에 complete 처리되지 않은 파일 기록을 만료 처리합니다.
+
+만료 기준은 `FileService`의 `PENDING_EXPIRATION_SECONDS` 값이며 현재 10초입니다.
+
+이 API는 아래 두 경우를 모두 정리합니다.
+
+- 클라이언트가 S3에 업로드하지 않아 객체가 없는 `PENDING` 기록
+- 클라이언트가 S3 업로드는 완료했지만 complete API를 호출하지 않은 `PENDING` 기록
+
+만료 대상의 S3 객체가 존재하면 삭제하고, 파일 기록 상태를 `EXPIRED`로 변경합니다.
+
+### curl
+
+```bash
+curl -X POST http://localhost:8080/files/expire-pending
+```
+
+### Response
+
+```json
+[
+  {
+    "fileId": "file-record-id",
+    "key": "uploads/uuid-sample.txt",
+    "objectDeleted": true
+  }
+]
+```
+
+`objectDeleted`는 만료 처리 중 S3 객체를 실제로 삭제했는지 나타냅니다.
+
+- `true`: S3 객체가 존재해서 삭제함
+- `false`: S3 객체가 없어 파일 기록만 만료 처리함
+
+### 내부 흐름
+
+```text
+FileController.expirePendingFiles
+-> FileService.expirePendingFiles
+-> FileRecordRepository.findByStatus(PENDING)
+-> FileRecord.isPendingExpired
+-> S3Client.headObject
+-> S3Client.deleteObject
+-> FileRecord.expire
 ```

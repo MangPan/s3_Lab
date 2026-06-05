@@ -38,6 +38,7 @@ Presigned URL은 서버가 가진 S3 접근 권한을 이용해 특정 작업을
 4. 클라이언트 -> Spring Boot 서버: 업로드 완료 검증 요청
 5. Spring Boot 서버 -> S3 또는 MinIO: HeadObject로 실제 업로드 확인
 6. Spring Boot 서버: 파일 크기와 Content-Type 검증
+7. Spring Boot 서버: 완료되지 않은 PENDING 기록 만료 정리
 ```
 
 파일 바이트가 백엔드 서버를 거치지 않고 클라이언트에서 S3로 직접 전송됩니다.
@@ -158,6 +159,7 @@ curl -X PUT "{presigned-url}" \
 - URL은 10분 동안만 유효합니다.
 - URL 만료 후에는 다시 발급받아야 합니다.
 - 업로드 완료 검증 시 파일 크기는 5MB 이하여야 합니다.
+- URL 만료 전에 S3 업로드가 끝났더라도 complete API를 호출하지 않으면 서버의 파일 기록은 계속 `PENDING`입니다.
 
 ## 4. 업로드 완료 검증 요청
 
@@ -199,7 +201,9 @@ PENDING -> UPLOADED
 - 실제 Content-Type
 - 업로드 완료 시각
 
-검증 실패나 S3 객체 미존재 상황에서는 `FileRecord.fail`이 호출되어 상태가 `FAILED`로 바뀔 수 있습니다.
+파일 크기나 Content-Type 정책을 위반하면 `FileRecord.reject`가 호출되어 상태가 `REJECTED`로 바뀝니다.
+
+S3 객체가 아직 없으면 `S3_OBJECT_NOT_FOUND`가 반환되고 상태는 `PENDING`으로 유지됩니다. 클라이언트가 업로드를 끝낸 뒤 complete API를 다시 호출할 수 있습니다.
 
 ## 상태 전환
 
@@ -219,14 +223,33 @@ Presigned PUT URL 발급
 ```text
 PENDING
 -> complete API 호출
--> S3 객체 미존재 또는 검증 실패
--> FAILED
+-> 파일 크기 또는 Content-Type 검증 실패
+-> REJECTED
+```
+
+S3 객체 미존재 흐름:
+
+```text
+PENDING
+-> complete API 호출
+-> S3 객체 미존재
+-> PENDING 유지
+```
+
+만료 흐름:
+
+```text
+PENDING
+-> 생성 후 10초 초과
+-> expire-pending API 호출
+-> S3 객체가 존재하면 삭제
+-> EXPIRED
 ```
 
 삭제 흐름:
 
 ```text
-PENDING 또는 UPLOADED 또는 FAILED
+PENDING 또는 UPLOADED 또는 REJECTED 또는 EXPIRED
 -> deleteByFileId API 호출
 -> S3 deleteObject
 -> DELETED
@@ -245,3 +268,20 @@ if(fileRecord.getStatus() == FileStatus.UPLOADED){
 즉, 완료 API가 중복 호출되어도 이미 완료된 파일은 다시 검증하지 않고 현재 기록을 반환합니다.
 
 `deleteByFileId`도 이미 `DELETED` 상태인 파일에 대해 다시 호출되면 추가 삭제 요청 없이 종료합니다.
+
+## PENDING 파일 만료 정리
+
+Presigned PUT URL 발급 후 complete API가 호출되지 않으면 파일 기록은 `PENDING` 상태로 남습니다. 이 프로젝트는 `POST /files/expire-pending` API로 생성 후 10초가 지난 `PENDING` 기록을 만료 처리합니다.
+
+```http
+POST /files/expire-pending
+```
+
+정리 기준:
+
+- `status`가 `PENDING`인 기록만 대상입니다.
+- `createdAt + 10초`가 현재 시각보다 이전이면 만료 대상입니다.
+- 만료 대상의 S3 객체가 이미 존재하면 삭제합니다.
+- 파일 기록은 `EXPIRED` 상태가 되고 `expiredAt`이 저장됩니다.
+
+응답의 `objectDeleted` 값은 S3 객체를 실제로 삭제했는지 나타냅니다. 클라이언트가 파일을 PUT하지 않은 상태로 만료되면 `false`, 파일은 올라갔지만 complete 하지 않은 상태로 만료되면 `true`가 됩니다.

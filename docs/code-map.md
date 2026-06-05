@@ -27,6 +27,8 @@ Presigned PUT URL 발급
 -> UPLOADED 상태 변경
 ```
 
+제한 시간 안에 complete 처리되지 않은 `PENDING` 기록은 만료 정리 API로 `EXPIRED` 상태가 됩니다. 이때 S3 객체가 이미 올라와 있으면 함께 삭제합니다.
+
 ## `S3labApplication.java`
 
 Spring Boot 애플리케이션의 시작점입니다.
@@ -87,16 +89,19 @@ Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니�
 - `status`: 업로드 상태
 - `size`: S3에 실제 업로드된 파일 크기
 - `actualContentType`: S3가 가진 실제 Content-Type
-- `failedReason`: 실패 상태로 전환된 이유
+- `rejectedReason`: 파일 정책 검증에 실패해 거부된 이유
 - `createdAt`: 기록 생성 시각
 - `uploadedAt`: 업로드 완료 시각
+- `expiredAt`: 만료 처리 시각
 - `deletedAt`: 삭제 처리 시각
 
 처음 생성될 때 상태는 `PENDING`입니다.
 
 `complete` 메서드가 호출되면 상태가 `UPLOADED`로 바뀌고, 실제 파일 크기와 Content-Type이 저장됩니다.
 
-`fail` 메서드가 호출되면 상태가 `FAILED`로 바뀌고 실패 이유가 저장됩니다.
+`reject` 메서드가 호출되면 상태가 `REJECTED`로 바뀌고 거부 이유가 저장됩니다.
+
+`expire` 메서드가 호출되면 상태가 `EXPIRED`로 바뀌고 만료 시각이 저장됩니다.
 
 `delete` 메서드가 호출되면 상태가 `DELETED`로 바뀌고 삭제 시각이 저장됩니다.
 
@@ -108,7 +113,8 @@ Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니�
 
 - `PENDING`: Presigned PUT URL은 발급됐지만 아직 업로드 완료 검증 전
 - `UPLOADED`: S3에 객체가 존재함을 확인한 상태
-- `FAILED`: 업로드 완료 검증 또는 파일 검증에 실패한 상태
+- `REJECTED`: 업로드된 객체가 파일 크기 또는 Content-Type 정책을 통과하지 못한 상태
+- `EXPIRED`: 제한 시간 안에 완료 처리되지 않은 상태
 - `DELETED`: 파일 삭제가 처리된 상태
 
 ## `file/controller/FileController.java`
@@ -154,6 +160,7 @@ Controller는 요청 파라미터, path variable, request body를 받아 `FileSe
 - 파일 기록 목록 조회
 - fileId 기반 다운로드 URL 발급
 - fileId 기반 삭제
+- 만료된 PENDING 파일 정리
 - 요청 Content-Type 검증
 - 업로드된 객체의 크기와 Content-Type 검증
 
@@ -201,7 +208,20 @@ fileId
 -> FileRecordResponse 반환
 ```
 
-검증 실패나 S3 객체 미존재 상황에서는 파일 상태가 `FAILED`로 변경될 수 있습니다.
+파일 크기나 Content-Type 검증에 실패하면 파일 상태가 `REJECTED`로 변경됩니다.
+
+S3 객체가 아직 없으면 `S3_OBJECT_NOT_FOUND` 예외가 발생하고, 상태는 `PENDING`으로 유지됩니다.
+
+### PENDING 파일 만료
+
+```text
+expirePendingFiles 호출
+-> PENDING 상태 기록 조회
+-> 생성 후 10초 초과 여부 확인
+-> S3 객체가 존재하면 deleteObject
+-> FileRecord.expire
+-> ExpiredFileResponse 반환
+```
 
 ### fileId 기반 삭제
 
@@ -224,6 +244,7 @@ fileId
 - `save`
 - `findById`
 - `findAll`
+- `findByStatus`
 
 주의할 점:
 
@@ -306,10 +327,21 @@ S3 객체 목록 조회 응답에 사용합니다.
 - `status`
 - `size`
 - `actualContentType`
-- `failedReason`
+- `rejectedReason`
 - `createdAt`
 - `uploadedAt`
+- `expiredAt`
 - `deletedAt`
+
+### `ExpiredFileResponse`
+
+만료된 PENDING 파일 정리 결과에 사용합니다.
+
+필드:
+
+- `fileId`
+- `key`
+- `objectDeleted`: 만료 처리 중 S3 객체를 실제 삭제했는지 여부
 
 ## `global/exception`
 
@@ -343,7 +375,7 @@ HTTP 응답 상태는 `404 Not Found`입니다.
 
 - 아직 S3에 업로드되지 않은 파일 완료 처리
 - 삭제된 파일 완료 처리
-- 실패 상태 파일 완료 처리
+- 거부 상태 파일 완료 처리
 - 업로드 완료 전 다운로드 URL 요청
 
 HTTP 응답 상태는 `409 Conflict`입니다.

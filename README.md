@@ -12,7 +12,8 @@ Spring Boot와 MinIO를 이용해 S3 파일 업로드, 다운로드, Presigned U
 - Presigned GET URL을 발급해 클라이언트가 직접 다운로드하기
 - Presigned PUT URL을 발급해 클라이언트가 S3에 직접 업로드하기
 - 업로드 완료 후 `HeadObject`로 실제 S3 객체 존재 여부 검증하기
-- 파일 업로드 상태를 `PENDING`, `UPLOADED`, `FAILED`, `DELETED`로 관리하기
+- 파일 업로드 상태를 `PENDING`, `UPLOADED`, `REJECTED`, `EXPIRED`, `DELETED`로 관리하기
+- 완료되지 않은 Presigned PUT 업로드 기록을 만료 처리하고, 이미 올라온 미완료 객체를 정리하기
 - 전역 예외 처리로 일관된 에러 응답 내려주기
 
 ## 기술 스택
@@ -111,6 +112,7 @@ s3.secret-key=minioadmin123
 | `POST` | `/files/{fileId}/complete` | Presigned PUT 업로드 완료 검증 |
 | `GET` | `/files/records` | 파일 기록 목록 조회 |
 | `GET` | `/files/{fileId}/presigned-get-url` | fileId 기반 Presigned GET URL 발급 |
+| `POST` | `/files/expire-pending` | 만료된 PENDING 파일 정리 |
 
 자세한 API 설명은 [docs/api.md](docs/api.md)를 참고합니다.
 
