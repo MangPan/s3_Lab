@@ -3,7 +3,7 @@ package com.example.s3lab.global.exception;
 import java.util.List;
 
 public record ErrorResponse(
-    String node,
+    String code,
     String message,
     List<FieldErrorResponse> errors
 ) {

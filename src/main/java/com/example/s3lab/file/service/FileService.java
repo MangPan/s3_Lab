@@ -1,6 +1,7 @@
 package com.example.s3lab.file.service;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.example.s3lab.domain.FileRecord;
@@ -29,6 +30,8 @@ import com.example.s3lab.global.exception.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -47,6 +50,7 @@ import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignReques
 import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest;
 
 @Service
+@Transactional(readOnly = true)
 public class FileService {
 
     private static final Logger log = LoggerFactory.getLogger(FileService.class);
@@ -60,8 +64,6 @@ public class FileService {
     );
     
     private static final int EXPIRE_BATCH_SIZE = 100;
-    private static final int MAX_EXPIRE_BATCHES_PER_RUN = 10;
-    
     
     private final S3Client s3Client; // S3Config에서 생성(등록)한 Bean이 스프링에 의해 주입됨
     private final S3Presigner s3Presigner;
@@ -227,6 +229,7 @@ public class FileService {
      * 프론트엔드가 스프링 백엔드 서버에 무거운 대용량 파일 바이트를 전송하지 않고,
      * S3 스토리지로 직접 파일을 안전하게 바로 업로드(PUT) 할 수 있는 임시 주소를 발급한다.
      */
+    @Transactional
     public PresignedPutUrlResponse createPresignedPutUrl(PresignedPutUrlRequest request) {
 
         // 먼저 Content-Type 유효성 검사 수행
@@ -285,6 +288,7 @@ public class FileService {
      * 프론트엔드가 S3로 직접 파일 전송을 마친 후 업로드가 완료 되었다고 호출하는 완료 시그널 API
      * S3 서버에 파일 메타데이터를(HeadObject)를 조회해보고, 실존함이 확인되면 해당 파일 상태를 'UPLOADED'로 최종 전환함
      */
+    @Transactional
     public FileRecordResponse completeUpload(String fileId){
         // 전달받은 고유 ID로 데이터베이스에 저장된 파일 기록 조회
         FileRecord fileRecord = getFileRecordOrThrow(fileId);
@@ -395,6 +399,7 @@ public class FileService {
         return createPresignedGetUrl(fileRecord.getKey());
     }
 
+    @Transactional
     public void deleteByFileId(String fileId){
         FileRecord fileRecord = getFileRecordOrThrow(fileId);
 
@@ -419,52 +424,30 @@ public class FileService {
         );
     }
 
-    // public List<ExpiredFileResponse> expirePendingFiles(){
-    //     Instant now = Instant.now();
-
-    //     return fileRecordRepository.findByStatus(FileStatus.PENDING)
-    //         .stream()
-    //         .filter(fileRecord -> fileRecord.isPendingExpired(now, PENDING_EXPIRATION_SECONDS))
-    //         .map(this::expirePendingFile)
-    //         .toList();
-            
-    // }
-
+    @Transactional
     public List<ExpiredFileResponse> expirePendingFiles(){
-        // 현재시간에서 PENDING_EXPIRATION_SECONDS를 뺀 시간을 구해 만료 시점 cutoff를 생성
+        // 현재시간에서 PENDING_EXPIRATION_SECONDS를 뺀 시간을 구해 만료 기준 시점 cutoff를 생성
         Instant cutoff = Instant.now().minusSeconds(this.pendingExpirationSeconds);
 
-        // 최종 처리 결과를 누적할 리스트 동적 배열로 처리 
-        List<ExpiredFileResponse> results = new ArrayList<ExpiredFileResponse>();
+        // 한 번에 조회해서 처리할 데이터의 양(EXPIRE_BATCH_SIZE)을 제한하기 위해 페이징(Pageable) 객체 생성
+        // 가장 오래된 데이터의 앞부분(0번째 페이지)를 긁어오도록 pageNumber를 0으로 고정
+        Pageable pageable = PageRequest.of(0, EXPIRE_BATCH_SIZE);
 
-        // 최대 지정된 배치 크기 만큼 반복
-        for(int i = 0; i < MAX_EXPIRE_BATCHES_PER_RUN; i++){
-            
-            // 데이터베이스에서 만료 대상 파일을 배치 크기 만큼 조회
-            List<FileRecord> targets = fileRecordRepository
-                .findExpiredPendingFiles(cutoff, EXPIRE_BATCH_SIZE);
-
-            // 만일 조회된게 없다면 루프 종료
-            if(targets.isEmpty()){
-                break;  
-            }
-            
-            // 조회된 파일들을 expirePendingFile의 매개로 넘겨 만료처리
-            List<ExpiredFileResponse> batchResults = targets.stream()
-                .map(this::expirePendingFile)
-                .toList();
-            
-            // 해당 배치에서 처리된 결과를 최종 결과 리스트에 모두 추가
-            results.addAll(batchResults);
-
-            // 만일 처리된 결과 리스트가 설정된 배치 크기보다 작다면 더 이상 처리할 대상이 없다는 의미이므로 루프 종료
-            if(batchResults.size() < EXPIRE_BATCH_SIZE){
-                break;
-            }
-        }
-
-        // 누적된 결과 리스트 반환
-        return results;
+        // fileRecordRepository를 통해 PENDING 상태이면서 cutoff보다 이전에 생성된 파일들을
+        // 설정된 배치 크기 만큼만 데이터베이스에서 조회함
+        List<FileRecord> targets = fileRecordRepository
+            .findByStatusAndCreatedAtBeforeOrderByCreatedAtAsc(
+                FileStatus.PENDING,
+                cutoff,
+                pageable
+            );
+        
+        // 조회된 만료 대상 파일들을 스트림을 통해 하나씩 expirePendingFile 메서드로 넘겨 EXPIRED로 상태 변경
+        // 처리 완료된 응답 객체들은 map으로 ExpiredFileResponse 리스트로 변환
+        // 이후 리스트로 반환 
+        return targets.stream()
+            .map(this::expirePendingFile)
+            .toList();
     } 
 
     // ====================================================================================================
