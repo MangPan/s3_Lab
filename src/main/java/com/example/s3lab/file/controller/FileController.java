@@ -17,6 +17,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
+import com.example.s3lab.file.dto.ExpiredFileResponse;
 import com.example.s3lab.file.dto.FileObjectResponse;
 import com.example.s3lab.file.dto.FileRecordResponse;
 import com.example.s3lab.file.dto.FileUploadResponse;
@@ -142,6 +143,12 @@ public class FileController {
     public PresignedGetUrlResponse createPresignedGetUrlByFileId(@PathVariable String fileId) {
         return fileService.createPresignedGetUrlByFileId(fileId);
     }
+
+    @PostMapping("/expire-pending")
+    public List<ExpiredFileResponse> expirePendingFiles() {
+        return fileService.expirePendingFiles();
+    }
+    
     
     
     

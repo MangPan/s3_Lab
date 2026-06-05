@@ -5,6 +5,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.example.s3lab.domain.FileRecord;
 import com.example.s3lab.domain.FileStatus;
+import com.example.s3lab.file.dto.ExpiredFileResponse;
 import com.example.s3lab.file.dto.FileObjectResponse;
 import com.example.s3lab.file.dto.FileRecordResponse;
 import com.example.s3lab.file.dto.FileUploadResponse;
@@ -15,6 +16,7 @@ import com.example.s3lab.file.repository.FileRecordRepository;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -51,6 +53,8 @@ public class FileService {
         "image/webp",
         "text/plain"
     );
+    private static final long PENDING_EXPIRATION_SECONDS = 10;
+
 
     private final S3Client s3Client; // S3Config에서 생성(등록)한 Bean이 스프링에 의해 주입됨
     private final S3Presigner s3Presigner;
@@ -279,8 +283,8 @@ public class FileService {
                 "삭제된 파일은 완료 처리할 수 없습니다. fileId=" + fileId
             );
         }
-        // 실패 처리된 파일이라면 예외 던짐
-        if(fileRecord.getStatus() == FileStatus.FAILED){
+        // 거부 처리된 파일이라면 예외 던짐
+        if(fileRecord.getStatus() == FileStatus.REJECTED){
             throw new ConflictException(
                 "FAILED_FILE_CANNOT_COMPLETE",
                 "실패 처리된 파일은 완료 처리할 수 없습니다. fileId=" + fileId
@@ -309,21 +313,16 @@ public class FileService {
             return FileRecordResponse.from(fileRecord);
         }
         catch(NoSuchKeyException exception){
-            fileRecord.fail("S3 object not found");
-
             throw new ConflictException(
                 "S3_OBJECT_NOT_FOUND",
                 "아직 S3에 파일이 업로드되지 않았습니다. key=" + fileRecord.getKey()
             );
         }
         catch (BadRequestException exception){
-            fileRecord.fail(exception.getMessage());
+            fileRecord.reject(exception.getMessage());
             throw exception;
         }
         catch(RuntimeException exception){
-            if(fileRecord.getStatus() == FileStatus.PENDING){
-                fileRecord.fail(exception.getMessage());
-            }
             throw exception;
         }
     }
@@ -371,6 +370,17 @@ public class FileService {
         s3Client.deleteObject(request);
 
         fileRecord.delete();
+    }
+
+    public List<ExpiredFileResponse> expirePendingFiles(){
+        Instant now = Instant.now();
+
+        return fileRecordRepository.findByStatus(FileStatus.PENDING)
+            .stream()
+            .filter(fileRecord -> fileRecord.isPendingExpired(now, PENDING_EXPIRATION_SECONDS))
+            .map(this::expirePendingFile)
+            .toList();
+            
     }
 
     // ====================================================================================================
@@ -439,6 +449,44 @@ public class FileService {
                 + ", actual="
                 + response.contentType()
             );
+        }
+    }
+
+    private ExpiredFileResponse expirePendingFile(FileRecord fileRecord){
+        boolean objectDeleted = deleteObjectIfExists(fileRecord);
+
+        fileRecord.expire();
+
+        return new ExpiredFileResponse(
+            fileRecord.getId(),
+            fileRecord.getKey(),
+            objectDeleted
+        );
+    }
+
+    private boolean deleteObjectIfExists(FileRecord fileRecord){
+        try{
+            HeadObjectRequest headRequest = HeadObjectRequest.builder()
+                .bucket(fileRecord.getBucket())
+                .key(fileRecord.getKey())
+                .build();
+            // 조회해서 없으면 여기서 예외 던져짐 (NoSuchKeyException)
+            s3Client.headObject(headRequest); 
+
+            // 따라서 여기까지 왔으면 해당 object가 bucket에 확실히 존재한다는 것!
+            DeleteObjectRequest deleteRequest = DeleteObjectRequest.builder()
+                .bucket(fileRecord.getBucket())
+                .key(fileRecord.getKey())
+                .build();
+            
+            // 삭제 성공시 true
+            s3Client.deleteObject(deleteRequest);
+
+            return true;
+        }
+        catch(NoSuchKeyException exception){
+            // 없어서 예외 터지면 false
+            return false;
         }
     }
 }

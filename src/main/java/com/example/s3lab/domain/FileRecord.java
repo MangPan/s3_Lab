@@ -16,11 +16,11 @@ public class FileRecord {
     private FileStatus status;
     private Long size;
     private String actualContentType;
-
-    private String failedReason;
+    private String rejectedReason;
 
     private final Instant createdAt;
     private Instant uploadedAt;
+    private Instant expiredAt;
     private Instant deletedAt;
 
     public FileRecord(
@@ -45,13 +45,27 @@ public class FileRecord {
         this.uploadedAt = Instant.now();
     }
 
-    public void fail(String reason){
-        this.status = FileStatus.FAILED;
-        this.failedReason = reason;
+    public void reject(String reason){
+        this.status = FileStatus.REJECTED;
+        this.rejectedReason = reason;
+    }
+
+    public void expire(){
+        this.status = FileStatus.EXPIRED;
+        this.expiredAt = Instant.now();
     }
 
     public void delete(){
         this.status = FileStatus.DELETED;
         this.deletedAt = Instant.now();
+    }
+
+    public boolean isPending(){
+        return this.status == FileStatus.PENDING;
+    }
+
+    public boolean isPendingExpired(Instant now, long expirationSeconds){
+        return status == FileStatus.PENDING
+            && createdAt.plusSeconds(expirationSeconds).isBefore(now);
     }
 }

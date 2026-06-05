@@ -14,9 +14,10 @@ public record FileRecordResponse(
         FileStatus status,
         Long size,
         String actualContentType,
-        String failedReason,
+        String rejectedReason,
         Instant createdAt,
         Instant uploadedAt,
+        Instant expiredAt,
         Instant deletedAt
     ) {
 
@@ -30,9 +31,10 @@ public record FileRecordResponse(
             fileRecord.getStatus(),
             fileRecord.getSize(),
             fileRecord.getActualContentType(),
-            fileRecord.getFailedReason(),
+            fileRecord.getRejectedReason(),
             fileRecord.getCreatedAt(),
             fileRecord.getUploadedAt(),
+            fileRecord.getExpiredAt(),
             fileRecord.getDeletedAt()
         );
     }

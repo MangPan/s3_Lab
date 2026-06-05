@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Repository;
 
 import com.example.s3lab.domain.FileRecord;
+import com.example.s3lab.domain.FileStatus;
 
 @Repository
 public class FileRecordRepository {
@@ -24,5 +25,12 @@ public class FileRecordRepository {
 
     public List<FileRecord> findAll(){
         return new ArrayList<>(store.values());
+    }
+
+    public List<FileRecord> findByStatus(FileStatus status){
+        return store.values()
+            .stream()
+            .filter(fileRecord -> (fileRecord.getStatus() == status))
+            .toList();
     }
 }
