@@ -26,6 +26,8 @@ import com.example.s3lab.global.exception.BadRequestException;
 import com.example.s3lab.global.exception.ConflictException;
 import com.example.s3lab.global.exception.NotFoundException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 
 import software.amazon.awssdk.core.ResponseBytes;
@@ -46,6 +48,8 @@ import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignReques
 
 @Service
 public class FileService {
+
+    private static final Logger log = LoggerFactory.getLogger(FileService.class);
 
     private static final long MAX_FILE_SIZE = 5*1024*1024;
     private static final Set<String> ALLOWED_CONTENT_TYPES = Set.of(
@@ -258,6 +262,13 @@ public class FileService {
         String url = s3Presigner.presignPutObject(presignRequest)
                 .url()
                 .toString();
+            
+        log.info(
+            "Created presigned PUT URL. fileId={}, key={}, contentType={}",
+            fileRecord.getId(),
+            fileRecord.getKey(),
+            request.contentType()
+        );
 
         // 이후 완료 검증 프로세스에서 추적할 수 있도록 파일의 고유파일 ID값과 함께 응답 DTO 반환
         return new PresignedPutUrlResponse(
@@ -316,10 +327,24 @@ public class FileService {
                 response.contentType()
             );
 
+            log.info(
+                "Completed file upload. fileId={}, key={}, size={}, contentType={}",
+                fileRecord.getId(),
+                fileRecord.getKey(),
+                response.contentLength(),
+                response.contentType()
+            );
+
             // dto로 반환
             return FileRecordResponse.from(fileRecord);
         }
         catch(NoSuchKeyException exception){
+            log.warn(
+                "S3 object not found while completing upload. fileId={}, key={}",
+                fileRecord.getId(),
+                fileRecord.getKey()
+            );
+
             throw new ConflictException(
                 "S3_OBJECT_NOT_FOUND",
                 "아직 S3에 파일이 업로드되지 않았습니다. key=" + fileRecord.getKey()
@@ -327,6 +352,14 @@ public class FileService {
         }
         catch (BadRequestException exception){
             fileRecord.reject(exception.getMessage());
+
+            log.warn(
+                "Rejected uploaded file. fileId={}, key={}, reason={}",
+                fileRecord.getId(),
+                fileRecord.getKey(),
+                exception.getMessage()
+            );
+
             throw exception;
         }
         catch(RuntimeException exception){
@@ -366,6 +399,7 @@ public class FileService {
         FileRecord fileRecord = getFileRecordOrThrow(fileId);
 
         if(fileRecord.getStatus() == FileStatus.DELETED){
+            log.info("File already deleted. fileId={}, key={}", fileRecord.getId(), fileRecord.getKey());
             return;
         }
 
@@ -377,6 +411,12 @@ public class FileService {
         s3Client.deleteObject(request);
 
         fileRecord.delete();
+
+        log.info(
+            "Deleted file. fileId={}, key={}",
+            fileRecord.getId(),
+            fileRecord.getKey()
+        );
     }
 
     // public List<ExpiredFileResponse> expirePendingFiles(){
@@ -510,6 +550,13 @@ public class FileService {
 
         fileRecord.expire();
 
+        log.info(
+            "Expired pending file. fileId={}, key={}, objectDeleted={}",
+            fileRecord.getId(),
+            fileRecord.getKey(),
+            objectDeleted
+        );
+
         return new ExpiredFileResponse(
             fileRecord.getId(),
             fileRecord.getKey(),
@@ -543,8 +590,22 @@ public class FileService {
             return true;
         }
         catch(NoSuchKeyException exception){
+            log.info(
+                "S3 object already missing. fileId={}, key={}",
+                fileRecord.getId(),
+                fileRecord.getKey()
+            );
             // 없어서 예외 터지면 false
             return false;
+        }
+        catch(RuntimeException exception){
+            log.error(
+                "Failed to delete S3 object. fileId={}, key={}",
+                fileRecord.getId(),
+                fileRecord.getKey(),
+                exception
+            );
+            throw exception;
         }
     }
 }
