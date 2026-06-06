@@ -416,9 +416,9 @@ S3에 아직 객체가 없으면 `409 Conflict`가 반환됩니다. 파일 상�
 GET /files/records
 ```
 
-애플리케이션 메모리에 저장된 파일 기록 목록을 조회합니다.
+H2 데이터베이스에 저장된 파일 기록 목록을 조회합니다.
 
-S3 객체 목록을 조회하는 `GET /files`와 다르게, 이 API는 `FileRecordRepository`에 저장된 업로드 기록을 조회합니다.
+S3 객체 목록을 조회하는 `GET /files`와 다르게, 이 API는 Spring Data JPA 기반 `FileRecordRepository`에 저장된 업로드 기록을 조회합니다.
 
 ### curl
 
@@ -557,7 +557,9 @@ POST /files/expire-pending
 
 Presigned PUT URL을 발급받았지만 제한 시간 안에 complete 처리되지 않은 파일 기록을 만료 처리합니다.
 
-만료 기준은 `FileService`의 `PENDING_EXPIRATION_SECONDS` 값이며 현재 10초입니다.
+만료 기준은 `file.pending-expiration-seconds` 설정값이며 현재 10초입니다.
+
+이 API는 수동 정리용입니다. 같은 정리 로직은 `FileCleanupScheduler`에서도 `file.expire-schedule-ms` 주기마다 자동 실행됩니다.
 
 이 API는 아래 두 경우를 모두 정리합니다.
 
@@ -594,8 +596,8 @@ curl -X POST http://localhost:8080/files/expire-pending
 ```text
 FileController.expirePendingFiles
 -> FileService.expirePendingFiles
--> FileRecordRepository.findByStatus(PENDING)
--> FileRecord.isPendingExpired
+-> FileRecordRepository.findByStatusAndCreatedAtBeforeOrderByCreatedAtAsc
+-> PageRequest로 최대 100개 조회
 -> S3Client.headObject
 -> S3Client.deleteObject
 -> FileRecord.expire

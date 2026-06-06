@@ -241,7 +241,7 @@ PENDING
 ```text
 PENDING
 -> 생성 후 10초 초과
--> expire-pending API 호출
+-> expire-pending API 호출 또는 FileCleanupScheduler 자동 실행
 -> S3 객체가 존재하면 삭제
 -> EXPIRED
 ```
@@ -271,7 +271,7 @@ if(fileRecord.getStatus() == FileStatus.UPLOADED){
 
 ## PENDING 파일 만료 정리
 
-Presigned PUT URL 발급 후 complete API가 호출되지 않으면 파일 기록은 `PENDING` 상태로 남습니다. 이 프로젝트는 `POST /files/expire-pending` API로 생성 후 10초가 지난 `PENDING` 기록을 만료 처리합니다.
+Presigned PUT URL 발급 후 complete API가 호출되지 않으면 파일 기록은 `PENDING` 상태로 남습니다. 이 프로젝트는 `POST /files/expire-pending` API와 `FileCleanupScheduler`로 생성 후 10초가 지난 `PENDING` 기록을 만료 처리합니다.
 
 ```http
 POST /files/expire-pending
@@ -281,7 +281,10 @@ POST /files/expire-pending
 
 - `status`가 `PENDING`인 기록만 대상입니다.
 - `createdAt + 10초`가 현재 시각보다 이전이면 만료 대상입니다.
+- JPA Repository가 오래된 기록부터 최대 100개씩 조회합니다.
 - 만료 대상의 S3 객체가 이미 존재하면 삭제합니다.
 - 파일 기록은 `EXPIRED` 상태가 되고 `expiredAt`이 저장됩니다.
 
 응답의 `objectDeleted` 값은 S3 객체를 실제로 삭제했는지 나타냅니다. 클라이언트가 파일을 PUT하지 않은 상태로 만료되면 `false`, 파일은 올라갔지만 complete 하지 않은 상태로 만료되면 `true`가 됩니다.
+
+자동 정리는 `@EnableScheduling`과 `@Scheduled(fixedDelayString = "${file.expire-schedule-ms}")`로 동작합니다. 현재 설정은 10초마다 한 번씩 만료 대상 파일을 정리합니다.

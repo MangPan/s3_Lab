@@ -8,8 +8,8 @@
 HTTP 요청
 -> FileController
 -> FileService
--> S3Client 또는 S3Presigner
--> MinIO
+-> FileRecordRepository 또는 S3Client/S3Presigner
+-> H2 Database 또는 MinIO
 ```
 
 예외가 발생하면 `GlobalExceptionHandler`가 공통 에러 응답 형식으로 변환합니다.
@@ -19,7 +19,7 @@ Presigned PUT 업로드 흐름에서는 파일 상태를 추적하기 위해 `Fi
 ```text
 Presigned PUT URL 발급
 -> FileRecord 생성
--> PENDING 상태 저장
+-> JPA Repository로 PENDING 상태 저장
 -> 클라이언트가 S3에 직접 업로드
 -> complete API 호출
 -> HeadObject로 실제 업로드 확인
@@ -27,13 +27,15 @@ Presigned PUT URL 발급
 -> UPLOADED 상태 변경
 ```
 
-제한 시간 안에 complete 처리되지 않은 `PENDING` 기록은 만료 정리 API로 `EXPIRED` 상태가 됩니다. 이때 S3 객체가 이미 올라와 있으면 함께 삭제합니다.
+제한 시간 안에 complete 처리되지 않은 `PENDING` 기록은 만료 정리 API 또는 스케줄러로 `EXPIRED` 상태가 됩니다. 이때 S3 객체가 이미 올라와 있으면 함께 삭제합니다.
 
 ## `S3labApplication.java`
 
 Spring Boot 애플리케이션의 시작점입니다.
 
 `main` 메서드에서 `SpringApplication.run`을 호출해 애플리케이션을 실행합니다.
+
+`@EnableScheduling`으로 스케줄링 기능을 켭니다. 이 설정이 있어야 `FileCleanupScheduler`의 `@Scheduled` 메서드가 주기적으로 실행됩니다.
 
 ## `config/S3Config.java`
 
@@ -77,13 +79,23 @@ Presigned URL 생성은 S3에 실제 요청을 보내는 작업이 아니라, �
 
 ## `domain/FileRecord.java`
 
-Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니다.
+Presigned PUT 방식의 업로드 상태를 추적하는 JPA Entity입니다.
+
+JPA 관련 설정:
+
+- `@Entity`: JPA가 관리하는 테이블 매핑 대상
+- `@Table(name = "file_records")`: 테이블 이름 지정
+- `@Index(name = "idx_file_records_status_created_at", columnList = "status, createdAt")`: 만료 대상 조회에 쓰는 상태와 생성 시각 인덱스
+- `@Index(name = "idx_file_records_object_key", columnList = "objectKey", unique = true)`: S3 object key 중복 방지
+- `@Id`: 파일 기록 ID를 기본키로 사용
+- `@Enumerated(EnumType.STRING)`: enum 이름을 문자열로 저장
+- `protected FileRecord(){}`: JPA가 Entity를 생성할 때 사용하는 기본 생성자
 
 주요 필드:
 
 - `id`: 파일 기록 ID
 - `bucket`: 저장 대상 버킷
-- `key`: S3 object key
+- `objectKey`: S3 object key
 - `originalFilename`: 원본 파일명
 - `requestedContentType`: 클라이언트가 요청한 Content-Type
 - `status`: 업로드 상태
@@ -104,6 +116,8 @@ Presigned PUT 방식의 업로드 상태를 추적하는 도메인 객체입니�
 `expire` 메서드가 호출되면 상태가 `EXPIRED`로 바뀌고 만료 시각이 저장됩니다.
 
 `delete` 메서드가 호출되면 상태가 `DELETED`로 바뀌고 삭제 시각이 저장됩니다.
+
+`getKey` 메서드는 기존 서비스 코드와 응답 DTO에서 `key`라는 이름을 계속 쓰기 위한 호환용 메서드입니다. 실제 Entity 필드명은 `objectKey`입니다.
 
 ## `domain/FileStatus.java`
 
@@ -139,12 +153,17 @@ Controller는 요청 파라미터, path variable, request body를 받아 `FileSe
 - 업로드 완료 검증 요청 받기
 - 파일 기록 목록 조회 요청 받기
 - fileId 기반 삭제 요청 받기
+- 만료된 PENDING 파일 수동 정리 요청 받기
 
 파일 다운로드 API에서는 S3 key에서 파일명을 추출하고, `Content-Disposition` 헤더를 구성합니다.
 
 ## `file/service/FileService.java`
 
 파일 처리의 핵심 로직이 들어 있는 서비스 클래스입니다.
+
+클래스에는 `@Transactional(readOnly = true)`가 붙어 있어 기본 조회 작업은 읽기 전용 트랜잭션으로 실행됩니다. 상태를 변경하는 메서드에는 별도로 `@Transactional`을 붙여 JPA 변경 감지가 동작하도록 합니다.
+
+`LoggerFactory.getLogger(FileService.class)`로 SLF4J logger를 생성하고, 파일 상태 변경과 S3 정리 결과를 기록합니다.
 
 주요 역할:
 
@@ -190,9 +209,10 @@ filename, contentType
 -> validateRequestedContentType
 -> generateKey
 -> FileRecord 생성
--> repository 저장
+-> FileRecordRepository.save
 -> PutObjectPresignRequest 생성
 -> S3Presigner.presignPutObject
+-> 발급 성공 로그 기록
 -> PresignedPutUrlResponse 반환
 ```
 
@@ -205,6 +225,7 @@ fileId
 -> S3Client.headObject
 -> validateUploadedObject
 -> FileRecord.complete
+-> 완료 성공 로그 기록
 -> FileRecordResponse 반환
 ```
 
@@ -216,10 +237,12 @@ S3 객체가 아직 없으면 `S3_OBJECT_NOT_FOUND` 예외가 발생하고, 상�
 
 ```text
 expirePendingFiles 호출
--> PENDING 상태 기록 조회
--> 생성 후 10초 초과 여부 확인
+-> cutoff = now - file.pending-expiration-seconds
+-> PageRequest.of(0, 100)
+-> findByStatusAndCreatedAtBeforeOrderByCreatedAtAsc
 -> S3 객체가 존재하면 deleteObject
 -> FileRecord.expire
+-> 만료 처리 로그 기록
 -> ExpiredFileResponse 반환
 ```
 
@@ -231,26 +254,75 @@ fileId
 -> 이미 DELETED면 바로 종료
 -> S3Client.deleteObject
 -> FileRecord.delete
+-> 삭제 로그 기록
 ```
 
 ## `file/repository/FileRecordRepository.java`
 
-파일 기록을 저장하는 인메모리 저장소입니다.
+파일 기록을 저장하고 조회하는 Spring Data JPA Repository입니다.
 
-내부적으로 `ConcurrentHashMap`을 사용합니다.
+`JpaRepository<FileRecord, String>`을 상속하므로 기본 CRUD 메서드를 자동으로 사용할 수 있습니다.
 
 제공하는 메서드:
 
 - `save`
 - `findById`
 - `findAll`
-- `findByStatus`
+- `findByStatusOrderByCreatedAtDesc`
+- `findByStatusAndCreatedAtBeforeOrderByCreatedAtAsc`
 
-주의할 점:
+파생 쿼리 메서드:
 
-- 데이터베이스가 아니라 메모리 저장소입니다.
-- 애플리케이션을 재시작하면 저장된 파일 기록은 사라집니다.
-- S3나 MinIO에 저장된 실제 파일은 사라지지 않습니다.
+- `findByStatusOrderByCreatedAtDesc`: 특정 상태의 파일 기록을 최신순으로 조회합니다.
+- `findByStatusAndCreatedAtBeforeOrderByCreatedAtAsc`: 특정 상태이면서 생성 시각이 기준보다 오래된 기록을 오래된 순으로 조회합니다.
+
+`Pageable`을 함께 넘기면 한 번에 처리할 개수를 제한할 수 있습니다. 만료 정리에서는 `PageRequest.of(0, 100)`으로 최대 100개씩 처리합니다.
+
+현재 DB 설정:
+
+- H2 인메모리 데이터베이스 사용
+- `spring.jpa.hibernate.ddl-auto=create-drop`
+- 애플리케이션 시작 시 테이블 생성, 종료 시 테이블 삭제
+- S3나 MinIO에 저장된 실제 파일은 DB 재생성과 별개로 남아 있습니다.
+
+## `file/scheduler/FileCleanupScheduler.java`
+
+완료되지 않은 `PENDING` 파일을 자동으로 정리하는 스케줄러입니다.
+
+주요 설정:
+
+- `@Component`: Spring Bean 등록
+- `@RequiredArgsConstructor`: `FileService` 생성자 주입
+- `@Scheduled(fixedDelayString = "${file.expire-schedule-ms}")`: 설정값 주기로 반복 실행
+
+동작 흐름:
+
+```text
+스케줄러 실행
+-> FileService.expirePendingFiles
+-> 만료된 파일이 있으면 count 로그 출력
+-> 예외 발생 시 실패 로그 출력
+```
+
+현재 `file.expire-schedule-ms=10000`이므로 이전 실행이 끝난 뒤 10초가 지나면 다시 실행됩니다.
+
+## 로깅
+
+이 프로젝트는 SLF4J `Logger`와 `LoggerFactory`를 사용합니다.
+
+로그가 남는 주요 지점:
+
+- Presigned PUT URL 발급: `Created presigned PUT URL`
+- 업로드 완료 검증 성공: `Completed file upload`
+- S3 객체 미존재: `S3 object not found while completing upload`
+- 파일 정책 위반: `Rejected uploaded file`
+- 삭제 완료 또는 이미 삭제된 파일: `Deleted file`, `File already deleted`
+- PENDING 파일 만료: `Expired pending file`
+- 만료 대상 S3 객체가 이미 없음: `S3 object already missing`
+- S3 객체 삭제 실패: `Failed to delete S3 object`
+- 스케줄러 정리 결과: `Expired pending files`
+
+`application.properties`에서 애플리케이션 로그는 DEBUG 이상, AWS SDK 내부 로그는 WARN 이상으로 제한합니다.
 
 ## DTO
 

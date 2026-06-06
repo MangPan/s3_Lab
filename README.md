@@ -22,6 +22,8 @@ Spring Boot와 MinIO를 이용해 S3 파일 업로드, 다운로드, Presigned U
 - Spring Boot 3.5.14
 - Gradle
 - AWS SDK for Java v2
+- Spring Data JPA
+- H2 Database
 - MinIO
 - Docker Compose
 - Lombok
@@ -43,6 +45,8 @@ src/main/java/com/example/s3lab
     ├── dto
     ├── repository
     │   └── FileRecordRepository.java
+    ├── scheduler
+    │   └── FileCleanupScheduler.java
     └── service
         └── FileService.java
 ```
@@ -94,9 +98,17 @@ s3.region=ap-northeast-2
 s3.bucket=s3-lab-bucket
 s3.access-key=minioadmin
 s3.secret-key=minioadmin123
+
+file.pending-expiration-seconds=10
+file.expire-schedule-ms=10000
+
+spring.datasource.url=jdbc:h2:mem:s3lab
+spring.jpa.hibernate.ddl-auto=create-drop
 ```
 
 학습 편의를 위해 access key와 secret key가 설정 파일에 직접 들어 있습니다. 실제 서비스에서는 환경 변수, AWS profile, IAM Role 같은 안전한 인증 방식을 사용해야 합니다.
+
+파일 기록은 Spring Data JPA를 통해 H2 인메모리 데이터베이스에 저장됩니다. `ddl-auto=create-drop` 설정이므로 애플리케이션을 재시작하면 파일 기록 테이블은 다시 생성됩니다. MinIO에 저장된 실제 S3 객체는 애플리케이션 재시작만으로 삭제되지 않습니다.
 
 ## 주요 API
 
@@ -123,3 +135,4 @@ s3.secret-key=minioadmin123
 - [예외 처리](docs/error-handling.md)
 - [Presigned URL 흐름](docs/presigned-url-flow.md)
 - [S3와 MinIO 설정](docs/s3-and-minio.md)
+- [학습 총정리](docs/study-summary.md)

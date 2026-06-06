@@ -83,6 +83,7 @@ Controller나 Service에서 예외가 발생하면 `GlobalExceptionHandler`가 H
 - `UPLOADED`가 아닌 상태에서는 fileId 기반 다운로드 Presigned URL을 발급할 수 없습니다.
 - `PENDING` 상태가 10초를 넘으면 `POST /files/expire-pending` 호출 시 `EXPIRED`로 변경됩니다.
 - 만료 대상 파일의 S3 객체가 이미 존재하면 만료 처리 중 함께 삭제됩니다.
+- 같은 만료 처리는 `FileCleanupScheduler`가 `file.expire-schedule-ms` 주기마다 자동으로도 실행합니다.
 
 ## Presigned PUT 검증
 
@@ -105,3 +106,16 @@ Presigned PUT URL 발급 시 요청 Content-Type을 검증합니다.
 검증 조건 중 파일 크기나 Content-Type 정책을 위반하면 파일 기록은 `REJECTED`로 바뀌고 거부 사유가 `rejectedReason`에 저장됩니다.
 
 S3 객체가 아직 존재하지 않는 경우에는 `409 Conflict`가 반환되지만 파일 상태는 `PENDING`으로 유지됩니다. 이후 클라이언트가 업로드를 완료하면 complete API를 다시 호출할 수 있습니다.
+
+## 로깅
+
+파일 상태 변경과 정리 작업은 SLF4J logger로 기록합니다.
+
+- Presigned PUT URL 발급 성공
+- complete 성공
+- S3 객체 미존재로 complete 실패
+- 파일 정책 위반으로 `REJECTED` 처리
+- fileId 기반 삭제 또는 이미 삭제된 파일 재삭제 요청
+- `PENDING` 파일 만료 처리
+- 만료 처리 중 S3 객체 삭제 실패
+- 스케줄러의 만료 정리 실행 결과
